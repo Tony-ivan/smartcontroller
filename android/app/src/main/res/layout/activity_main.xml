@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg">
+
+    <com.ps2pad.gamepad.GamepadView
+        android:id="@+id/gamepad"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- connection bar -->
+    <LinearLayout
+        android:id="@+id/bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="6dp"
+        android:background="#CC000000">
+
+        <EditText
+            android:id="@+id/ipField"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="PC IP (e.g. 192.168.43.1)"
+            android:textColorHint="#888888"
+            android:textColor="#FFFFFF"
+            android:inputType="number|numberDecimal"
+            android:digits="0123456789."
+            android:imeOptions="actionDone"
+            android:maxLines="1" />
+
+        <Button
+            android:id="@+id/discoverBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Discover" />
+
+        <Button
+            android:id="@+id/connectBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Connect" />
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="10dp"
+            android:paddingEnd="6dp"
+            android:text="offline"
+            android:textColor="#FF6B6B" />
+
+        <Button
+            android:id="@+id/playerBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="P1" />
+
+        <Button
+            android:id="@+id/editBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Edit" />
+
+        <Button
+            android:id="@+id/resetBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Reset" />
+
+        <Button
+            android:id="@+id/hideBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Hide" />
+    </LinearLayout>
+</FrameLayout>

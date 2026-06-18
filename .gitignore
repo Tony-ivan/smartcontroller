@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Android build output (android/.gitignore covers the rest of the subtree)
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+
+# OS / editor
+.DS_Store
+Thumbs.db
