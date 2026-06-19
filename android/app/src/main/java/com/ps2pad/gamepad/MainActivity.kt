@@ -1,6 +1,8 @@
 package com.ps2pad.gamepad
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
@@ -13,11 +15,17 @@ import android.widget.Toast
 class MainActivity : AppCompatActivity() {
 
     private lateinit var net: NetworkClient
+    private lateinit var usb: UsbClient
     private lateinit var gamepad: GamepadView
     private lateinit var status: TextView
     private lateinit var ipField: EditText
     private lateinit var bar: View
     private lateinit var playerBtn: Button
+    private lateinit var usbBtn: Button
+
+    // when true, input goes to the PC over the USB cable (TCP) instead of Wi-Fi.
+    @Volatile private var usbMode = false
+    private val ui = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -25,13 +33,17 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         net = NetworkClient(this)
+        usb = UsbClient()
         gamepad = findViewById(R.id.gamepad)
         status = findViewById(R.id.status)
         ipField = findViewById(R.id.ipField)
         bar = findViewById(R.id.bar)
         playerBtn = findViewById(R.id.playerBtn)
+        usbBtn = findViewById(R.id.usbBtn)
 
-        gamepad.onInput = { packet -> net.send(packet) }
+        // route each packet to whichever transport is active (USB cable or Wi-Fi)
+        gamepad.onInput = { packet -> if (usbMode) usb.send(packet) else net.send(packet) }
+        usbBtn.setOnClickListener { toggleUsb() }
 
         // which virtual controller this phone drives; restored from prefs.
         // Tap to cycle P1→P2→P3→P4 so a second phone can be set to P2, etc.
@@ -101,6 +113,40 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    /** Flip between USB (wired) and Wi-Fi transports. */
+    private fun toggleUsb() {
+        usbMode = !usbMode
+        if (usbMode) {
+            usb.enable()
+            usbBtn.text = "USB ✓"
+            setStatus("USB… connecting", false)
+            toast("USB mode. If your phone asks, allow USB debugging.")
+            pollUsbStatus()
+        } else {
+            usb.disable()
+            usbBtn.text = "USB"
+            ui.removeCallbacks(usbStatusPoll)
+            val ip = net.targetIp()
+            if (ip != null) setStatus("connected → $ip", true)
+            else setStatus("offline", false)
+        }
+    }
+
+    // While in USB mode, reflect the live cable-link state in the status text.
+    private val usbStatusPoll = object : Runnable {
+        override fun run() {
+            if (!usbMode) return
+            if (usb.connected) setStatus("USB connected", true)
+            else setStatus("USB… waiting for cable", false)
+            ui.postDelayed(this, 500)
+        }
+    }
+
+    private fun pollUsbStatus() {
+        ui.removeCallbacks(usbStatusPoll)
+        ui.post(usbStatusPoll)
+    }
+
     private fun updatePlayerBtn() {
         playerBtn.text = "P${gamepad.state.player + 1}"
     }
@@ -133,7 +179,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        ui.removeCallbacks(usbStatusPoll)
         net.close()
+        usb.close()
     }
 
     companion object {

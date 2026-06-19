@@ -1,9 +1,17 @@
 """
 PS2Pad PC server.
 
-Receives gamepad input from the Android app over UDP (your phone's hotspot
-network) and feeds it into a virtual Xbox 360 controller via ViGEmBus.
-PCSX2 (or any game/emulator) then sees a completely normal controller.
+Receives gamepad input from the Android app and feeds it into a virtual
+Xbox 360 controller via ViGEmBus. PCSX2 (or any game/emulator) then sees a
+completely normal controller.
+
+Two transports carry the exact same packets:
+  * Wi-Fi  — the phone sends UDP to this PC over the hotspot subnet.
+  * USB    — the phone is plugged in with USB debugging authorized; the app
+             opens a TCP socket to 127.0.0.1:9999 on the phone and `adb
+             reverse` tunnels it over the cable to this server's TCP listener.
+             We auto-run `adb reverse` for every connected device.
+`adb` only tunnels TCP (not UDP), which is why the USB path is TCP.
 
 Multiple phones can play at once: each phone tags its packets with a player
 number (set in the app), and we route each player to its own virtual Xbox 360
@@ -29,9 +37,12 @@ subnet; we reply "PS2PAD_HERE" so the app learns this PC's IP automatically.
 Usage:  python server.py [num_players]   (default 2)
 """
 
+import shutil
 import socket
 import struct
+import subprocess
 import sys
+import threading
 import time
 
 try:
@@ -67,6 +78,7 @@ BUTTON_BITS = {
     11: vg.XUSB_BUTTON.XUSB_GAMEPAD_B,              # Circle
     12: vg.XUSB_BUTTON.XUSB_GAMEPAD_X,              # Square
     13: vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,              # Triangle
+    14: vg.XUSB_BUTTON.XUSB_GAMEPAD_GUIDE,          # Analog/mode button -> Guide
 }
 
 
@@ -119,6 +131,128 @@ def num_players_from_args():
     return DEFAULT_PLAYERS
 
 
+# Shared, throttled input logger. Both transports (UDP loop + TCP threads) call
+# this, so the [input] line shows a unified per-player count no matter how the
+# packets arrived. A lock keeps the throttle/print atomic across threads.
+_log_lock = threading.Lock()
+_last_log = [0.0]
+
+
+def note_input(packets, player, source):
+    packets[player] += 1
+    now = time.time()
+    with _log_lock:
+        if now - _last_log[0] >= 2.0:
+            counts = "  ".join(f"P{i + 1}:{c}" for i, c in enumerate(packets))
+            print(f"[input] {source} via {source_label(source)}  ({counts})")
+            _last_log[0] = now
+
+
+def source_label(source):
+    # adb-reverse connections arrive from loopback; everything else is Wi-Fi.
+    return "USB" if source.startswith("127.") else "Wi-Fi"
+
+
+def handle_tcp_conn(conn, addr, pads, packets):
+    """Read a stream of fixed-size packets from one USB (adb-reverse) client.
+
+    TCP has no message boundaries, so we buffer bytes and pull off PACKET_SIZE
+    frames. We stay aligned by checking the MAGIC byte: if the buffer doesn't
+    start with it, drop one byte and resync. Each good frame goes through the
+    same apply_packet() the UDP path uses."""
+    src = addr[0]
+    buf = bytearray()
+    with conn:
+        while True:
+            try:
+                chunk = conn.recv(256)
+            except OSError:
+                break
+            if not chunk:
+                break          # client closed
+            buf.extend(chunk)
+            while len(buf) >= PACKET_SIZE:
+                if buf[0] != MAGIC:
+                    del buf[0]          # resync to the next possible frame
+                    continue
+                frame = bytes(buf[:PACKET_SIZE])
+                del buf[:PACKET_SIZE]
+                player = apply_packet(pads, frame)
+                if player is not None:
+                    note_input(packets, player, src)
+
+
+def tcp_listener(pads, packets):
+    """Accept USB clients on loopback (adb reverse forwards the cable here).
+
+    Bound to 127.0.0.1 on purpose: adb connects to the host's loopback, and we
+    don't want this TCP port exposed to the network — Wi-Fi already has its own
+    UDP listener."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", PORT))
+    srv.listen(MAX_PLAYERS)
+    while True:
+        try:
+            conn, addr = srv.accept()
+        except OSError:
+            break
+        threading.Thread(
+            target=handle_tcp_conn,
+            args=(conn, addr, pads, packets),
+            daemon=True,
+        ).start()
+
+
+def adb_reverse_loop():
+    """Keep `adb reverse tcp:9999 -> tcp:9999` set on every connected device.
+
+    Polls every few seconds so it survives unplug/replug and devices that are
+    only authorized after the server starts. Per-device `-s` means two plugged
+    phones both work (and we avoid adb's 'more than one device' error). If adb
+    isn't installed we say so once and give up — Wi-Fi still works fine."""
+    adb = shutil.which("adb")
+    if adb is None:
+        print("[usb] adb not found in PATH — USB mode disabled.")
+        print("      Install Android platform-tools (adb) to play over the cable.")
+        return
+
+    known = set()
+    while True:
+        devices = adb_devices(adb)
+        appeared = devices - known
+        gone = known - devices
+        for serial in sorted(appeared):
+            res = subprocess.run(
+                [adb, "-s", serial, "reverse", f"tcp:{PORT}", f"tcp:{PORT}"],
+                capture_output=True, text=True,
+            )
+            if res.returncode == 0:
+                print(f"[usb] {serial} ready — tap USB in the app.")
+            else:
+                print(f"[usb] {serial} reverse failed: {res.stderr.strip()}")
+        for serial in sorted(gone):
+            print(f"[usb] {serial} disconnected.")
+        known = devices
+        time.sleep(3.0)
+
+
+def adb_devices(adb):
+    """Set of serials that are fully authorized ('device' state)."""
+    try:
+        out = subprocess.run(
+            [adb, "devices"], capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    serials = set()
+    for line in out.splitlines()[1:]:          # skip the "List of devices" header
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            serials.add(parts[0])
+    return serials
+
+
 def main():
     num_players = num_players_from_args()
     # Pre-create one virtual Xbox 360 pad per player. Creating them up front (in
@@ -134,21 +268,28 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", PORT))
 
+    # per-player packet counters, shared by both transports so the log shows
+    # each phone independently no matter how it connected.
+    packets = [0] * num_players
+
+    # USB transport: a loopback TCP listener plus a thread that keeps `adb
+    # reverse` set on connected devices. Both are daemons so Ctrl+C still quits.
+    threading.Thread(target=tcp_listener, args=(pads, packets), daemon=True).start()
+    threading.Thread(target=adb_reverse_loop, daemon=True).start()
+
     print("=" * 52)
     print("  PS2Pad server running")
     print(f"  {num_players} virtual Xbox 360 controller(s) now active.")
-    print(f"  Listening on UDP port {PORT}")
+    print(f"  Listening on UDP port {PORT} (Wi-Fi) + TCP {PORT} (USB)")
     print("  This PC's IP address(es):")
     for ip in local_ips():
         print(f"      {ip}")
-    print("  In each app: pick a player (P1/P2), tap Discover, Connect.")
+    print("  Wi-Fi: in each app pick a player (P1/P2), tap Discover, Connect.")
+    print("  USB:   plug the phone in, allow USB debugging, tap USB in the app.")
     print("  In PCSX2: map controller port 1 to P1, port 2 to P2.")
     print("  Press Ctrl+C to quit.")
     print("=" * 52)
 
-    last_log = 0.0
-    # per-player packet counters, so the log shows both phones independently
-    packets = [0] * num_players
     while True:
         try:
             data, addr = sock.recvfrom(64)
@@ -164,12 +305,7 @@ def main():
             continue
         player = apply_packet(pads, data)
         if player is not None:
-            packets[player] += 1
-            now = time.time()
-            if now - last_log >= 2.0:
-                counts = "  ".join(f"P{i + 1}:{c}" for i, c in enumerate(packets))
-                print(f"[input] {addr[0]}  ({counts})")
-                last_log = now
+            note_input(packets, player, addr[0])
 
 
 if __name__ == "__main__":

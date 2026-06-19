@@ -48,6 +48,8 @@ class GamepadView @JvmOverloads constructor(
     private val controls = mutableListOf<Control>()
     private val pointerOwners = HashMap<Int, Control>()
     private val editGrabs = HashMap<Int, EditGrab>()
+    // active two-finger pinch-to-resize, if any (edit mode only)
+    private var pinch: Pinch? = null
 
     // ---- paints ----
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -99,8 +101,10 @@ class GamepadView @JvmOverloads constructor(
 
         controls += RectButton("SELECT", InputState.SELECT, w * 0.43f, h * 0.16f, w * 0.06f, h * 0.045f, "SELECT")
         controls += RectButton("START", InputState.START, w * 0.57f, h * 0.16f, w * 0.06f, h * 0.045f, "START")
+        // PS2 analog/mode button -> Xbox Guide button (bind it in PCSX2)
+        controls += RectButton("ANALOG", InputState.ANALOG, w * 0.5f, h * 0.28f, w * 0.055f, h * 0.04f, "ANALOG")
 
-        controls += Dpad("DPAD", w * 0.20f, h * 0.54f, h * 0.16f)
+        controls += Dpad("DPAD", w * 0.20f, h * 0.54f, h * 0.20f)
 
         val fx = w * 0.80f
         val fy = h * 0.50f
@@ -115,7 +119,7 @@ class GamepadView @JvmOverloads constructor(
         controls += SymbolButton("L3", InputState.L3, w * 0.135f, h * 0.84f, r * 0.7f, Symbol.LABEL_L3, baseColor)
         controls += SymbolButton("R3", InputState.R3, w * 0.865f, h * 0.84f, r * 0.7f, Symbol.LABEL_R3, baseColor)
 
-        // apply any saved custom positions
+        // apply any saved custom positions and sizes
         for (c in controls) {
             val nx = layoutPrefs.getFloat("${c.id}_x", -1f)
             val ny = layoutPrefs.getFloat("${c.id}_y", -1f)
@@ -123,14 +127,17 @@ class GamepadView @JvmOverloads constructor(
                 c.cx = nx * w
                 c.cy = ny * h
             }
+            val sc = layoutPrefs.getFloat("${c.id}_s", 1f)
+            if (sc in MIN_SCALE..MAX_SCALE) c.scale = sc
         }
     }
 
-    private fun savePosition(c: Control) {
+    private fun saveControl(c: Control) {
         if (width <= 0 || height <= 0) return
         layoutPrefs.edit()
             .putFloat("${c.id}_x", c.cx / width)
             .putFloat("${c.id}_y", c.cy / height)
+            .putFloat("${c.id}_s", c.scale)
             .apply()
     }
 
@@ -191,24 +198,57 @@ class GamepadView @JvmOverloads constructor(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val i = event.actionIndex
+                val id = event.getPointerId(i)
                 val x = event.getX(i); val y = event.getY(i)
                 val c = controls.firstOrNull { it.hit(x, y) }
-                if (c != null) editGrabs[event.getPointerId(i)] = EditGrab(c, c.cx - x, c.cy - y)
+                // A second finger on a control that's already grabbed starts a
+                // pinch-to-resize on it instead of a second drag.
+                val grab = editGrabs.entries.firstOrNull { it.value.control === c }
+                if (c != null && grab != null && pinch == null) {
+                    val oi = event.findPointerIndex(grab.key)
+                    if (oi >= 0) {
+                        val d = hypot(event.getX(oi) - x, event.getY(oi) - y)
+                        pinch = Pinch(c, grab.key, id, max(1f, d), c.scale)
+                    }
+                } else if (c != null) {
+                    editGrabs[id] = EditGrab(c, c.cx - x, c.cy - y)
+                }
             }
             MotionEvent.ACTION_MOVE -> {
+                pinch?.let { p ->
+                    val i1 = event.findPointerIndex(p.p1)
+                    val i2 = event.findPointerIndex(p.p2)
+                    if (i1 >= 0 && i2 >= 0) {
+                        val d = hypot(event.getX(i1) - event.getX(i2), event.getY(i1) - event.getY(i2))
+                        p.control.scale = (p.startScale * d / p.startDist).coerceIn(MIN_SCALE, MAX_SCALE)
+                    }
+                }
                 for (i in 0 until event.pointerCount) {
-                    val g = editGrabs[event.getPointerId(i)] ?: continue
+                    val id = event.getPointerId(i)
+                    // fingers driving an active pinch don't also drag the control
+                    if (id == pinch?.p1 || id == pinch?.p2) continue
+                    val g = editGrabs[id] ?: continue
                     g.control.cx = (event.getX(i) + g.dx).coerceIn(0f, width.toFloat())
                     g.control.cy = (event.getY(i) + g.dy).coerceIn(0f, height.toFloat())
                 }
             }
             MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP -> {
                 val id = event.getPointerId(event.actionIndex)
-                editGrabs.remove(id)?.let { savePosition(it.control) }
+                val p = pinch
+                if (p != null && (id == p.p1 || id == p.p2)) {
+                    saveControl(p.control)
+                    // drop both pinch fingers so the surviving one doesn't jump the control
+                    editGrabs.remove(p.p1)
+                    editGrabs.remove(p.p2)
+                    pinch = null
+                } else {
+                    editGrabs.remove(id)?.let { saveControl(it.control) }
+                }
             }
             MotionEvent.ACTION_CANCEL -> {
-                for (g in editGrabs.values) savePosition(g.control)
+                for (g in editGrabs.values) saveControl(g.control)
                 editGrabs.clear()
+                pinch = null
             }
         }
         invalidate()
@@ -255,10 +295,17 @@ class GamepadView @JvmOverloads constructor(
 
     private class EditGrab(val control: Control, val dx: Float, val dy: Float)
 
+    private class Pinch(
+        val control: Control, val p1: Int, val p2: Int,
+        val startDist: Float, val startScale: Float
+    )
+
     private interface Control {
         val id: String
         var cx: Float
         var cy: Float
+        /** Per-control size multiplier, adjusted by pinch-to-resize in edit mode. */
+        var scale: Float
         fun hit(x: Float, y: Float): Boolean
         fun press(x: Float, y: Float)
         fun release()
@@ -271,11 +318,14 @@ class GamepadView @JvmOverloads constructor(
         override var cx: Float, override var cy: Float,
         val hw: Float, val hh: Float, val label: String
     ) : Control {
+        override var scale = 1f
         var pressed = false
-        private fun rect() = RectF(cx - hw, cy - hh, cx + hw, cy + hh)
+        private val shw get() = hw * scale
+        private val shh get() = hh * scale
+        private fun rect() = RectF(cx - shw, cy - shh, cx + shw, cy + shh)
 
         override fun hit(x: Float, y: Float) =
-            x in cx - hw * 1.2f..cx + hw * 1.2f && y in cy - hh * 1.2f..cy + hh * 1.2f
+            x in cx - shw * 1.2f..cx + shw * 1.2f && y in cy - shh * 1.2f..cy + shh * 1.2f
 
         override fun press(x: Float, y: Float) { pressed = true; state.setButton(bit, true) }
         override fun release() { pressed = false; state.setButton(bit, false) }
@@ -283,16 +333,16 @@ class GamepadView @JvmOverloads constructor(
         override fun draw(c: Canvas) {
             val rect = rect()
             fill.color = if (pressed) pressColor else baseColor
-            c.drawRoundRect(rect, hh * 0.6f, hh * 0.6f, fill)
+            c.drawRoundRect(rect, shh * 0.6f, shh * 0.6f, fill)
             stroke.color = edgeColor
-            c.drawRoundRect(rect, hh * 0.6f, hh * 0.6f, stroke)
+            c.drawRoundRect(rect, shh * 0.6f, shh * 0.6f, stroke)
             val ts = text.textSize
-            text.textSize = min(ts, hh * 1.4f)
+            text.textSize = min(ts, shh * 1.4f)
             c.drawText(label, cx, centeredTextY(cy), text)
             text.textSize = ts
         }
 
-        override fun drawEditHint(c: Canvas) = hintRect(c, cx, cy, hw, hh)
+        override fun drawEditHint(c: Canvas) = hintRect(c, cx, cy, shw, shh)
     }
 
     /** L2 / R2 — on-screen digital press maps to a full analog trigger pull. */
@@ -301,11 +351,14 @@ class GamepadView @JvmOverloads constructor(
         override var cx: Float, override var cy: Float,
         val hw: Float, val hh: Float, val label: String
     ) : Control {
+        override var scale = 1f
         var pressed = false
-        private fun rect() = RectF(cx - hw, cy - hh, cx + hw, cy + hh)
+        private val shw get() = hw * scale
+        private val shh get() = hh * scale
+        private fun rect() = RectF(cx - shw, cy - shh, cx + shw, cy + shh)
 
         override fun hit(x: Float, y: Float) =
-            x in cx - hw * 1.2f..cx + hw * 1.2f && y in cy - hh * 1.2f..cy + hh * 1.2f
+            x in cx - shw * 1.2f..cx + shw * 1.2f && y in cy - shh * 1.2f..cy + shh * 1.2f
 
         override fun press(x: Float, y: Float) {
             pressed = true
@@ -320,16 +373,16 @@ class GamepadView @JvmOverloads constructor(
         override fun draw(c: Canvas) {
             val rect = rect()
             fill.color = if (pressed) pressColor else baseColor
-            c.drawRoundRect(rect, hh * 0.6f, hh * 0.6f, fill)
+            c.drawRoundRect(rect, shh * 0.6f, shh * 0.6f, fill)
             stroke.color = edgeColor
-            c.drawRoundRect(rect, hh * 0.6f, hh * 0.6f, stroke)
+            c.drawRoundRect(rect, shh * 0.6f, shh * 0.6f, stroke)
             val ts = text.textSize
-            text.textSize = min(ts, hh * 1.4f)
+            text.textSize = min(ts, shh * 1.4f)
             c.drawText(label, cx, centeredTextY(cy), text)
             text.textSize = ts
         }
 
-        override fun drawEditHint(c: Canvas) = hintRect(c, cx, cy, hw, hh)
+        override fun drawEditHint(c: Canvas) = hintRect(c, cx, cy, shw, shh)
     }
 
     private inner class SymbolButton(
@@ -337,31 +390,35 @@ class GamepadView @JvmOverloads constructor(
         override var cx: Float, override var cy: Float, val r: Float,
         val symbol: Symbol, val symbolColor: Int
     ) : Control {
+        override var scale = 1f
         var pressed = false
-        override fun hit(x: Float, y: Float) = hypot(x - cx, y - cy) <= r * 1.18f
+        private val sr get() = r * scale
+        override fun hit(x: Float, y: Float) = hypot(x - cx, y - cy) <= sr * 1.18f
         override fun press(x: Float, y: Float) { pressed = true; state.setButton(bit, true) }
         override fun release() { pressed = false; state.setButton(bit, false) }
 
         override fun draw(c: Canvas) {
             fill.color = if (pressed) pressColor else baseColor
-            c.drawCircle(cx, cy, r, fill)
+            c.drawCircle(cx, cy, sr, fill)
             stroke.color = edgeColor
-            c.drawCircle(cx, cy, r, stroke)
-            drawSymbol(c, symbol, cx, cy, r * 0.5f, symbolColor)
+            c.drawCircle(cx, cy, sr, stroke)
+            drawSymbol(c, symbol, cx, cy, sr * 0.5f, symbolColor)
         }
 
-        override fun drawEditHint(c: Canvas) = hintCircle(c, cx, cy, r)
+        override fun drawEditHint(c: Canvas) = hintCircle(c, cx, cy, sr)
     }
 
     private inner class Dpad(
         override val id: String, override var cx: Float, override var cy: Float, val size: Float
     ) : Control {
-        val arm = size * 0.42f
-        val dead = size * 0.22f
+        override var scale = 1f
+        private val ssize get() = size * scale
+        private val arm get() = ssize * 0.42f
+        private val dead get() = ssize * 0.22f
         var up = false; var down = false; var left = false; var right = false
 
         override fun hit(x: Float, y: Float) =
-            x in cx - size..cx + size && y in cy - size..cy + size
+            x in cx - ssize..cx + ssize && y in cy - ssize..cy + ssize
 
         override fun press(x: Float, y: Float) {
             val dx = x - cx; val dy = y - cy
@@ -383,8 +440,8 @@ class GamepadView @JvmOverloads constructor(
 
         override fun draw(c: Canvas) {
             fill.color = baseColor
-            val v = RectF(cx - arm, cy - size, cx + arm, cy + size)
-            val hRect = RectF(cx - size, cy - arm, cx + size, cy + arm)
+            val v = RectF(cx - arm, cy - ssize, cx + arm, cy + ssize)
+            val hRect = RectF(cx - ssize, cy - arm, cx + ssize, cy + arm)
             c.drawRoundRect(v, arm * 0.5f, arm * 0.5f, fill)
             c.drawRoundRect(hRect, arm * 0.5f, arm * 0.5f, fill)
             stroke.color = edgeColor
@@ -392,13 +449,13 @@ class GamepadView @JvmOverloads constructor(
             c.drawRoundRect(hRect, arm * 0.5f, arm * 0.5f, stroke)
 
             fill.color = pressColor
-            if (up) c.drawRoundRect(RectF(cx - arm, cy - size, cx + arm, cy - dead), arm * 0.4f, arm * 0.4f, fill)
-            if (down) c.drawRoundRect(RectF(cx - arm, cy + dead, cx + arm, cy + size), arm * 0.4f, arm * 0.4f, fill)
-            if (left) c.drawRoundRect(RectF(cx - size, cy - arm, cx - dead, cy + arm), arm * 0.4f, arm * 0.4f, fill)
-            if (right) c.drawRoundRect(RectF(cx + dead, cy - arm, cx + size, cy + arm), arm * 0.4f, arm * 0.4f, fill)
+            if (up) c.drawRoundRect(RectF(cx - arm, cy - ssize, cx + arm, cy - dead), arm * 0.4f, arm * 0.4f, fill)
+            if (down) c.drawRoundRect(RectF(cx - arm, cy + dead, cx + arm, cy + ssize), arm * 0.4f, arm * 0.4f, fill)
+            if (left) c.drawRoundRect(RectF(cx - ssize, cy - arm, cx - dead, cy + arm), arm * 0.4f, arm * 0.4f, fill)
+            if (right) c.drawRoundRect(RectF(cx + dead, cy - arm, cx + ssize, cy + arm), arm * 0.4f, arm * 0.4f, fill)
         }
 
-        override fun drawEditHint(c: Canvas) = hintRect(c, cx, cy, size, size)
+        override fun drawEditHint(c: Canvas) = hintRect(c, cx, cy, ssize, ssize)
     }
 
     private inner class Stick(
@@ -406,17 +463,21 @@ class GamepadView @JvmOverloads constructor(
         override var cx: Float, override var cy: Float,
         val baseR: Float, val knobR: Float
     ) : Control {
+        override var scale = 1f
+        private val sBaseR get() = baseR * scale
+        private val sKnobR get() = knobR * scale
         var knobOffX = 0f; var knobOffY = 0f
 
-        override fun hit(x: Float, y: Float) = hypot(x - cx, y - cy) <= baseR * 1.5f
+        override fun hit(x: Float, y: Float) = hypot(x - cx, y - cy) <= sBaseR * 1.5f
 
         override fun press(x: Float, y: Float) {
             var dx = x - cx; var dy = y - cy
             val mag = hypot(dx, dy)
-            if (mag > baseR) { dx = dx / mag * baseR; dy = dy / mag * baseR }
+            val r = sBaseR
+            if (mag > r) { dx = dx / mag * r; dy = dy / mag * r }
             knobOffX = dx; knobOffY = dy
-            val nx = (dx / baseR).coerceIn(-1f, 1f)
-            val ny = (dy / baseR).coerceIn(-1f, 1f)
+            val nx = (dx / r).coerceIn(-1f, 1f)
+            val ny = (dy / r).coerceIn(-1f, 1f)
             val vx = (nx * 32767).toInt()
             val vy = (-ny * 32767).toInt()
             if (isLeft) { state.lx = vx; state.ly = vy } else { state.rx = vx; state.ry = vy }
@@ -429,16 +490,16 @@ class GamepadView @JvmOverloads constructor(
 
         override fun draw(c: Canvas) {
             fill.color = Color.parseColor("#1B1F29")
-            c.drawCircle(cx, cy, baseR, fill)
+            c.drawCircle(cx, cy, sBaseR, fill)
             stroke.color = edgeColor
-            c.drawCircle(cx, cy, baseR, stroke)
+            c.drawCircle(cx, cy, sBaseR, stroke)
             fill.color = pressColor
-            c.drawCircle(cx + knobOffX, cy + knobOffY, knobR, fill)
+            c.drawCircle(cx + knobOffX, cy + knobOffY, sKnobR, fill)
             stroke.color = Color.parseColor("#88ABFF")
-            c.drawCircle(cx + knobOffX, cy + knobOffY, knobR, stroke)
+            c.drawCircle(cx + knobOffX, cy + knobOffY, sKnobR, stroke)
         }
 
-        override fun drawEditHint(c: Canvas) = hintCircle(c, cx, cy, baseR)
+        override fun drawEditHint(c: Canvas) = hintCircle(c, cx, cy, sBaseR)
     }
 
     // ---------------------------------------------------------------- symbols
@@ -477,5 +538,11 @@ class GamepadView @JvmOverloads constructor(
             }
         }
         stroke.strokeWidth = sw
+    }
+
+    companion object {
+        // bounds for per-control pinch-to-resize (1f = the default layout size)
+        private const val MIN_SCALE = 0.5f
+        private const val MAX_SCALE = 2.5f
     }
 }

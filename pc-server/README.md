@@ -1,8 +1,12 @@
 # PS2Pad — PC server
 
-Turns UDP input from the Android app into a **virtual Xbox 360 controller**
+Turns input from the Android app into a **virtual Xbox 360 controller**
 using [ViGEmBus](https://github.com/ViGEm/ViGEmBus). PCSX2 (and Windows) see a
 normal controller — it feels exactly like you plugged a pad in.
+
+The app can reach this server two ways, both carrying the same packets:
+**Wi-Fi** (UDP over the phone's hotspot) or **USB** (TCP over the cable, tunnelled
+by `adb reverse`). The server listens for both at once on port 9999.
 
 ## Setup (Windows)
 
@@ -34,6 +38,20 @@ normal controller — it feels exactly like you plugged a pad in.
    printed — then **Connect**.
 4. Open PCSX2 → *Settings → Controllers*. The "Xbox 360 Controller" appears.
    Map it (the default PS2→Xbox mapping below already lines up).
+
+### Over USB (no hotspot)
+
+1. Put `adb` on your PATH — install Android **platform-tools**. The server
+   prints `[usb] adb not found…` on startup if it's missing.
+2. On the phone, turn on **Developer options → USB debugging**, then plug it in
+   and tap **Allow** on the *Allow USB debugging?* prompt.
+3. With `server.py` running, it auto-runs `adb reverse tcp:9999 tcp:9999` for
+   the device and logs `[usb] <serial> ready — tap USB in the app`.
+4. In the app, tap **USB**. The `[input]` log will show the source as `USB`.
+
+If you plugged in before starting the server it'll catch up within a few
+seconds (it re-checks devices every 3s). Manual fallback:
+`adb reverse tcp:9999 tcp:9999`.
 
 ### Two phones = two controllers
 
@@ -69,3 +87,9 @@ each phone is coming through.
   `pip install vgamepad`, or grab the installer from the ViGEmBus releases page.
 - **Discover finds nothing** → some phones block broadcast on hotspot; just
   type the PC IP shown by the server and tap Connect.
+- **USB: `adb not found`** → install Android platform-tools and make sure `adb`
+  is on your PATH, then restart the server.
+- **USB: nothing happens after tapping USB** → run `adb devices`. If the phone
+  shows as `unauthorized`, unlock it and accept the *Allow USB debugging?*
+  prompt; if it's missing entirely, check the cable (must support data) and that
+  USB debugging is on. The TCP port is **9999/TCP** on loopback.

@@ -63,5 +63,6 @@ class InputState {
         const val CIRCLE = 11
         const val SQUARE = 12
         const val TRIANGLE = 13
+        const val ANALOG = 14   // PS2 analog/mode button -> Xbox Guide button
     }
 }

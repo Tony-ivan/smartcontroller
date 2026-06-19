@@ -45,6 +45,12 @@
             android:layout_height="wrap_content"
             android:text="Connect" />
 
+        <Button
+            android:id="@+id/usbBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="USB" />
+
         <TextView
             android:id="@+id/status"
             android:layout_width="wrap_content"

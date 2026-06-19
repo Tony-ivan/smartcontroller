@@ -6,11 +6,14 @@ controller, so PCSX2 (or any game) just works — it feels exactly like you
 inserted a real pad.
 
 ```
-┌─────────────┐   Wi-Fi / hotspot   ┌──────────────────┐   ViGEmBus driver  ┌────────┐
-│ Android app │ ──UDP packets────►  │ Python PC server │ ──virtual pad────► │ PCSX2  │
-│ (gamepad UI)│   port 9999         │  (vgamepad)      │  (fake Xbox 360)   │ /games │
-└─────────────┘                     └──────────────────┘                    └────────┘
+┌─────────────┐   Wi-Fi  ─UDP 9999──►  ┌──────────────────┐  ViGEmBus driver  ┌────────┐
+│ Android app │                        │ Python PC server │ ─virtual pad────► │ PCSX2  │
+│ (gamepad UI)│   USB cable ─TCP 9999─► │  (vgamepad)      │  (fake Xbox 360)  │ /games │
+└─────────────┘   (via `adb reverse`)   └──────────────────┘                   └────────┘
 ```
+
+Two ways to connect — pick whichever you have: **Wi-Fi** (the phone's hotspot)
+or a **USB cable**. Both stream the exact same input to the same virtual pad.
 
 ## Why it works this way
 
@@ -68,6 +71,30 @@ gradle assembleDebug
 Tap **Hide** to clear the connection bar; tap the **top-left corner** to bring
 it back.
 
+### Wired / USB mode (no Wi-Fi needed)
+
+If there's no hotspot — or you just want a more stable, lower-latency link —
+plug the phone into the PC with a USB cable instead.
+
+A phone still can't pretend to be a USB controller, so we tunnel the same input
+down the cable with `adb` (the Android debug bridge). `adb` only forwards TCP,
+so USB mode uses a TCP socket while Wi-Fi keeps using UDP — you don't have to
+care, the app and server handle both.
+
+1. **PC prerequisite:** `adb` must be on your PATH (install Android
+   *platform-tools*). The server checks for it on startup.
+2. On the phone, enable **Developer options → USB debugging**.
+3. Plug the phone into the PC. The first time, the phone shows an *Allow USB
+   debugging?* prompt — tap **Allow**.
+4. Start the server (`python server.py`) if it isn't already. It auto-runs
+   `adb reverse tcp:9999 tcp:9999` for the device and logs `… ready — tap USB`.
+5. In the app, tap the **USB** button in the bar. Status turns green
+   (`USB connected`); input now flows over the cable. Tap **USB** again to
+   switch back to Wi-Fi.
+
+Manual fallback (if the server's auto-setup didn't run, e.g. you plugged in
+later): run `adb reverse tcp:9999 tcp:9999` yourself, then tap **USB**.
+
 ### Two players (two phones)
 
 Both phones connect to the **same PC hotspot** and the same PC IP — the server
@@ -91,10 +118,12 @@ both phones are getting through.
 
 ## Protocol (for reference)
 
-14-byte UDP frame, big-endian: `magic(0xA5) | player(u8) | buttons(u16) | LX LY
-RX RY(i16 each) | L2 R2(u8 each)`. The `player` byte (0 = P1, 1 = P2, …) routes
-the packet to that player's virtual pad. Button bit order is defined identically
-in `InputState.kt` and `server.py`.
+14-byte frame, big-endian: `magic(0xA5) | player(u8) | buttons(u16) | LX LY
+RX RY(i16 each) | L2 R2(u8 each)`. The same frame is sent as one UDP datagram
+over Wi-Fi, or back-to-back over the TCP stream in USB mode (the server resyncs
+on the `0xA5` magic byte). The `player` byte (0 = P1, 1 = P2, …) routes the
+packet to that player's virtual pad. Button bit order is defined identically in
+`InputState.kt` and `server.py`.
 
 ## Notes / known limits
 
