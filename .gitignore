@@ -4,6 +4,9 @@ __pycache__/
 .venv/
 venv/
 
+# Auto-downloaded Android platform-tools (adb) for USB mode
+pc-server/.platform-tools/
+
 # Android build output (android/.gitignore covers the rest of the subtree)
 android/build/
 android/app/build/

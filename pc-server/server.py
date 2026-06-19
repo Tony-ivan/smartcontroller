@@ -10,7 +10,8 @@ Two transports carry the exact same packets:
   * USB    — the phone is plugged in with USB debugging authorized; the app
              opens a TCP socket to 127.0.0.1:9999 on the phone and `adb
              reverse` tunnels it over the cable to this server's TCP listener.
-             We auto-run `adb reverse` for every connected device.
+             We auto-run `adb reverse` for every connected device, and even
+             auto-download adb (platform-tools) if it isn't already installed.
 `adb` only tunnels TCP (not UDP), which is why the USB path is TCP.
 
 Multiple phones can play at once: each phone tags its packets with a player
@@ -37,6 +38,7 @@ subnet; we reply "PS2PAD_HERE" so the app learns this PC's IP automatically.
 Usage:  python server.py [num_players]   (default 2)
 """
 
+import os
 import shutil
 import socket
 import struct
@@ -44,6 +46,9 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
+import zipfile
 
 try:
     import vgamepad as vg
@@ -61,6 +66,11 @@ DISCOVER_MSG = b"PS2PAD_DISCOVER"
 DISCOVER_REPLY = b"PS2PAD_HERE"
 DEFAULT_PLAYERS = 2
 MAX_PLAYERS = 4                   # ViGEmBus / XInput tops out at 4 controllers
+
+# Official Google platform-tools bundle (contains adb.exe + its Windows DLLs).
+# Fetched on demand when adb isn't already on PATH. Windows-only, like the rest
+# of the server (ViGEmBus is Windows-only).
+ADB_DOWNLOAD_URL = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
 
 # bit index in the buttons field  ->  vgamepad Xbox button
 BUTTON_BITS = {
@@ -204,17 +214,72 @@ def tcp_listener(pads, packets):
         ).start()
 
 
+def adb_path():
+    """Path to an adb executable, downloading platform-tools on first need.
+
+    Preference order: an adb already on PATH wins (respects a user's existing
+    install); then a copy we downloaded earlier under .platform-tools/;
+    otherwise fetch Google's official bundle (Windows only). Returns None if no
+    adb is available and we couldn't obtain one — USB mode just stays off."""
+    onpath = shutil.which("adb")
+    if onpath:
+        return onpath
+
+    cached = os.path.join(_script_dir(), ".platform-tools", "platform-tools", "adb.exe")
+    if os.path.isfile(cached):
+        return cached
+
+    # Auto-download is Windows-only — that's the only platform the server runs on.
+    if not sys.platform.startswith("win"):
+        print("[usb] adb not found — install Android platform-tools to use USB mode.")
+        return None
+
+    return download_adb(cached)
+
+
+def download_adb(cached):
+    """Fetch + unzip Google's platform-tools next to this script. Returns the
+    adb.exe path, or None on any failure (network, bad zip, missing exe)."""
+    dest_root = os.path.join(_script_dir(), ".platform-tools")
+    zip_path = os.path.join(dest_root, "platform-tools.zip")
+    try:
+        os.makedirs(dest_root, exist_ok=True)
+        print("[usb] adb not found — downloading Android platform-tools (~10 MB)…")
+        print(f"      {ADB_DOWNLOAD_URL}")
+        urllib.request.urlretrieve(ADB_DOWNLOAD_URL, zip_path)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(dest_root)
+    except (OSError, urllib.error.URLError, zipfile.BadZipFile) as e:
+        print(f"[usb] adb download failed: {e}")
+        print("      Install Android platform-tools manually to use USB mode.")
+        return None
+    finally:
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+
+    if os.path.isfile(cached):
+        print("[usb] platform-tools ready.")
+        return cached
+    print("[usb] download finished but adb.exe was missing from the archive.")
+    return None
+
+
+def _script_dir():
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def adb_reverse_loop():
     """Keep `adb reverse tcp:9999 -> tcp:9999` set on every connected device.
 
     Polls every few seconds so it survives unplug/replug and devices that are
     only authorized after the server starts. Per-device `-s` means two plugged
     phones both work (and we avoid adb's 'more than one device' error). If adb
-    isn't installed we say so once and give up — Wi-Fi still works fine."""
-    adb = shutil.which("adb")
+    isn't available (and can't be downloaded) we give up — Wi-Fi still works."""
+    adb = adb_path()
     if adb is None:
-        print("[usb] adb not found in PATH — USB mode disabled.")
-        print("      Install Android platform-tools (adb) to play over the cable.")
+        print("[usb] USB mode disabled (no adb available).")
         return
 
     known = set()

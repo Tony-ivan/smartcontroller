@@ -41,8 +41,11 @@ by `adb reverse`). The server listens for both at once on port 9999.
 
 ### Over USB (no hotspot)
 
-1. Put `adb` on your PATH — install Android **platform-tools**. The server
-   prints `[usb] adb not found…` on startup if it's missing.
+1. **adb is handled for you.** If `adb` isn't already on your PATH, the server
+   downloads Google's official Android platform-tools (~8 MB) into
+   `pc-server/.platform-tools/` the first time it needs it and uses that copy.
+   An existing `adb` on your PATH is always preferred. (No internet / download
+   blocked? Install platform-tools manually and put `adb` on PATH.)
 2. On the phone, turn on **Developer options → USB debugging**, then plug it in
    and tap **Allow** on the *Allow USB debugging?* prompt.
 3. With `server.py` running, it auto-runs `adb reverse tcp:9999 tcp:9999` for
@@ -87,8 +90,9 @@ each phone is coming through.
   `pip install vgamepad`, or grab the installer from the ViGEmBus releases page.
 - **Discover finds nothing** → some phones block broadcast on hotspot; just
   type the PC IP shown by the server and tap Connect.
-- **USB: `adb not found`** → install Android platform-tools and make sure `adb`
-  is on your PATH, then restart the server.
+- **USB: `adb download failed`** → the server couldn't fetch platform-tools
+  (no internet, proxy, or firewall). Install Android platform-tools manually,
+  put `adb` on your PATH, and restart the server.
 - **USB: nothing happens after tapping USB** → run `adb devices`. If the phone
   shows as `unauthorized`, unlock it and accept the *Allow USB debugging?*
   prompt; if it's missing entirely, check the cable (must support data) and that
